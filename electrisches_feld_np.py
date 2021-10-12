@@ -1,5 +1,3 @@
-# password: 31693169
-
 import pygame
 import numpy as np
 
