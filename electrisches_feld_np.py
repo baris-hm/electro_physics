@@ -40,22 +40,27 @@ class Particle:
 class Field:
     def __init__(self, screen: pygame.Surface, particles, vector_spacing=20):
         self.screen = screen
-        self.raw_field = np.zeros((screen.get_height(), screen.get_width, 2))
+        self.raw_field = np.zeros((screen.get_height(), screen.get_width(), 2))
         self.vector_spacing = vector_spacing
         self.particles = particles
 
     def compute(self, particles):
         h = self.screen.get_height()
         w = self.screen.get_width()
-        if self.raw_field.shape != (h, w, 2):
-            # Regenerate field
-            self.raw_field = np.zeros((h, w, 2))
+        self.raw_field = np.zeros((w, h, 2))
         x_f = np.array([list(range(w)) for _ in range(h)])
         y_f = np.array([[y for _ in range(w)] for y in range(h)])
+
         for particle in particles:
             dx = x_f - particle.x
             dy = y_f - particle.y
-            # dists =
+            dir_field = np.stack(dx, dy, axis=-1)
+            dist_squared = (dx * dx) + (dy * dy)
+            dist_root = np.sqrt(dist_squared)
+            norm_field = dir_field / dist_root
+            force_field = norm_field * (4 * particle.charge) / (dist_squared + 1.5)
+            self.raw_field += force_field
+
 
     def show_vectors(self, screen: pygame.Surface, particles):
         h = screen.get_height()
@@ -64,11 +69,12 @@ class Field:
         col = w // self.vector_spacing
         vertical_shift = (h / 2) % self.vector_spacing - self.vector_spacing // 2
         horizontal_shift = (w / 2) % self.vector_spacing - self.vector_spacing // 2
+        self.compute(particles)
         for i in range(row + 1):
             y = vertical_shift + i * self.vector_spacing
             for j in range(col + 1):
                 x = horizontal_shift + j * self.vector_spacing
-                vector = calc_vector(x, y, particles)
+                vector = self.raw_field[x][y]
                 pygame.draw.line(screen, GREY, (x, y), (x + vector[0], y + vector[1]))
                 length = (vector[0] * vector[0] + vector[1] * vector[1]) ** 0.5
                 if length != 0:
@@ -173,11 +179,11 @@ def add_stick(x, y, charge):
 def main():
     screen = pygame.display.set_mode((800, 600), pygame.RESIZABLE)
 
-    field = Field(15)
     add_stick(100, 30, 5)
     add_stick(400, 30, -5)
     particles = [Particle(700, 300, 20), Particle(600, 150, 20), Particle(700, 150, -20)]
     particles += stick_list
+    field = Field(screen, particles, vector_spacing=15)
     upper_bar = UpperBar(screen)
     upper_bar.add_items('text', 'text2', 'text3')
 
