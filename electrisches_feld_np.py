@@ -40,48 +40,59 @@ class Particle:
 class Field:
     def __init__(self, screen: pygame.Surface, particles, vector_spacing=20):
         self.screen = screen
-        self.raw_field = np.zeros((screen.get_height(), screen.get_width, 2))
         self.vector_spacing = vector_spacing
         self.particles = particles
 
     def compute(self, particles):
         h = self.screen.get_height()
         w = self.screen.get_width()
-        if self.raw_field.shape != (h, w, 2):
-            # Regenerate field
-            self.raw_field = np.zeros((h, w, 2))
-        x_f = np.array([list(range(w)) for _ in range(h)])
-        y_f = np.array([[y for _ in range(w)] for y in range(h)])
+
+        y_f = np.array([list(range(0, h, self.vector_spacing)) for _ in range(0, w, self.vector_spacing)])
+        x_f = np.array([[x for _ in range(0, h, self.vector_spacing)] for x in range(0, w, self.vector_spacing)])
+
+        self.raw_field = np.zeros((x_f.shape[0], x_f.shape[1], 2))
+
         for particle in particles:
             dx = x_f - particle.x
             dy = y_f - particle.y
-            # dists =
+            dir_field = np.stack([dx, dy], axis=-1)
+            dist_squared = (dx * dx) + (dy * dy)
+            dist_root = np.linalg.norm(dir_field, ord=None, axis=-1)
+            norm_divider = np.stack([dist_root, dist_root], axis=-1)
+            norm_field = dir_field / norm_divider
+            intensities_normal = (4 * particle.charge) / (dist_squared + 1.5)
+            force = np.stack([intensities_normal, intensities_normal], axis=-1)
+            force_field = norm_field * force
+            self.raw_field += force_field
+        self.intensities = np.linalg.norm(self.raw_field, ord=None, axis=-1)
+        max_intensity = 0.05 / 255.0
+        self.color_intensities = self.intensities / max_intensity
 
     def show_vectors(self, screen: pygame.Surface, particles):
         h = screen.get_height()
         w = screen.get_width()
         row = h // self.vector_spacing
         col = w // self.vector_spacing
-        vertical_shift = (h / 2) % self.vector_spacing - self.vector_spacing // 2
-        horizontal_shift = (w / 2) % self.vector_spacing - self.vector_spacing // 2
+        self.compute(particles)
         for i in range(row + 1):
-            y = vertical_shift + i * self.vector_spacing
+            y = i
             for j in range(col + 1):
-                x = horizontal_shift + j * self.vector_spacing
-                vector = calc_vector(x, y, particles)
-                pygame.draw.line(screen, GREY, (x, y), (x + vector[0], y + vector[1]))
-                length = (vector[0] * vector[0] + vector[1] * vector[1]) ** 0.5
+                x = j
+                vector_x = self.raw_field[int(x), int(y), 0]
+                vector_y = self.raw_field[int(x), int(y), 1]
+                pygame.draw.line(screen, GREY, (x, y), (x + vector_x, y + vector_y))
+                length = self.intensities[int(x)][int(y)]
                 if length != 0:
-                    x_unit = vector[0] * 5 / length
-                    y_unit = vector[1] * 5 / length
-                    pygame.draw.line(screen, GREY,
-                                     (x + vector[0], y + vector[1]),
-                                     (x + vector[0] - x_unit - y_unit, y + vector[1] - y_unit + x_unit)
-                                     )
-                    pygame.draw.line(screen, GREY,
-                                     (x + vector[0], y + vector[1]),
-                                     (x + vector[0] - x_unit + y_unit, y + vector[1] - y_unit - x_unit)
-                                     )
+                    x_unit = vector_x / length
+                    y_unit = vector_y / length
+                    #pygame.draw.line(screen, GREY,
+                    #                 (x + vector_x, y + vector_y),
+                    #                 (x + vector_x - x_unit - y_unit, y + vector_y - y_unit + x_unit)
+                    #                 )
+                    #pygame.draw.line(screen, GREY,
+                    #                 (x + vector_x, y + vector_y),
+                    #                 (x + vector_x - x_unit + y_unit, y + vector_y - y_unit - x_unit)
+                    #                 )
 
     def show_vectors_with_color(self, screen: pygame.Surface, particles):
         h = screen.get_height()
@@ -90,24 +101,34 @@ class Field:
         col = w // self.vector_spacing
         vertical_shift = (h / 2) % self.vector_spacing - self.vector_spacing // 2
         horizontal_shift = (w / 2) % self.vector_spacing - self.vector_spacing // 2
-        for i in range(row + 1):
-            y = vertical_shift + i * self.vector_spacing
-            for j in range(col + 1):
-                x = horizontal_shift + j * self.vector_spacing
-                vector = calc_vector(x, y, particles)
-                length = (vector[0] * vector[0] + vector[1] * vector[1]) ** 0.5
-                if length != 0:
-                    x_unit = vector[0] * 5 / length
-                    y_unit = vector[1] * 5 / length
-                    color = (min(255, int(length * 5)), max(0, int(127 - length * 5)), 0)
-                    pygame.draw.line(screen, color, (x, y), (x + 3 * x_unit, y + 3 * y_unit))
+        self.compute(particles)
+        for i in range(row):
+            y = i
+            ydraw = vertical_shift + i * self.vector_spacing
+            for j in range(col):
+                x = j
+                xdraw = horizontal_shift + j * self.vector_spacing
+                vector_x = self.raw_field[int(x), int(y), 0]
+                vector_y = self.raw_field[int(x), int(y), 1]
+                length = self.intensities[int(x)][int(y)]
+                ci = self.color_intensities[int(x)][int(y)]
+                if length != 0 and not np.isnan(length):
+                    x_unit = vector_x * 5 / length
+                    y_unit = vector_y * 5 / length
+                    #print(length)
+                    color = (min(255, int(ci)), min(255, max(0, int(127 - ci))), 0)
+                    #despaghettify
+                    #print("LINE", (xdraw, ydraw), (xdraw + 3 * x_unit, ydraw + 3 * y_unit))
+                    pygame.draw.line(screen, color, (xdraw, ydraw), (xdraw + 3 * x_unit, ydraw + 3 * y_unit))
+                    #print("LINE1", (xdraw + 3 * x_unit, ydraw + 3 * y_unit), (xdraw + 2 * x_unit - y_unit, y + 2 * y_unit + x_unit))
                     pygame.draw.line(screen, color,
-                                     (x + 3 * x_unit, y + 3 * y_unit),
-                                     (x + 2 * x_unit - y_unit, y + 2 * y_unit + x_unit)
+                                     (xdraw + 3 * x_unit, ydraw + 3 * y_unit),
+                                     (xdraw + 2 * x_unit - y_unit, ydraw + 2 * y_unit + x_unit)
                                      )
+                    #print("LINE2", (xdraw + 3 * x_unit, ydraw + 3 * y_unit), (xdraw + 2 * x_unit + y_unit, y + 2 * y_unit - x_unit))
                     pygame.draw.line(screen, color,
-                                     (x + 3 * x_unit, y + 3 * y_unit),
-                                     (x + 2 * x_unit + y_unit, y + 2 * y_unit - x_unit)
+                                     (xdraw + 3 * x_unit, ydraw + 3 * y_unit),
+                                     (xdraw + 2 * x_unit + y_unit, ydraw + 2 * y_unit - x_unit)
                                      )
 
 
@@ -139,27 +160,6 @@ class UpperBar:
         pass
 
 
-def calc_vector(x, y, particles):
-    total_x = 0
-    total_y = 0
-    for particle in particles:
-        dx = x - particle.x
-        dy = y - particle.y
-        dist = (dx * dx + dy * dy) ** 0.5
-        if dist < 20:
-            return [0, 0]
-        else:
-            dist *= 0.25 / particle.charge
-            dx /= dist
-            dy /= dist
-            factor = 1 / (dist * dist + 1.5)
-        dx *= factor
-        dy *= factor
-        total_x += dx
-        total_y += dy
-    return [total_x, total_y]
-
-
 stick_list = []
 
 
@@ -173,11 +173,11 @@ def add_stick(x, y, charge):
 def main():
     screen = pygame.display.set_mode((800, 600), pygame.RESIZABLE)
 
-    field = Field(15)
     add_stick(100, 30, 5)
     add_stick(400, 30, -5)
     particles = [Particle(700, 300, 20), Particle(600, 150, 20), Particle(700, 150, -20)]
     particles += stick_list
+    field = Field(screen, particles, vector_spacing=15)
     upper_bar = UpperBar(screen)
     upper_bar.add_items('text', 'text2', 'text3')
 
