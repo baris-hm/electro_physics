@@ -1,4 +1,13 @@
-import pygame
+import random
+import time
+
+import sys
+import os
+oldstdout = sys.stdout
+with open(os.devnull) as sys.stdout:
+    #suppress pygame banner
+    import pygame
+sys.stdout = oldstdout
 import numpy as np
 
 pygame.init()
