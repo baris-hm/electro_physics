@@ -1,3 +1,4 @@
+import math
 import random
 import time
 
@@ -10,7 +11,8 @@ with open(os.devnull, "w") as sys.stdout:
     import pygame
 sys.stdout = oldstdout
 # TODO: Use custom prebuilt GPU kernel with cupy instead of generic numpy wrapper
-if os.getenv("USE_CUPY"):
+using_cupy = False
+if os.getenv("USE_CUPY") or using_cupy:
     print("Importing CuPy...")
     try:
         import cupy as np
@@ -19,6 +21,7 @@ if os.getenv("USE_CUPY"):
         import numpy as np
     else:
         print("Successfully imported CuPy")
+        using_cupy = True
 else:
     print("Importing NumPy...")
     import numpy as np
@@ -69,7 +72,39 @@ class Field:
         self.w = None
         # so the check below gets triggered and we recycle code for init
         self.check_buffers()
-
+        if using_cupy:
+            self.kernel = np.RawKernel(
+                '''
+                extern "C" __global__ void show_vectors(const int2 *particle_coords, const float *particle_charges, int particle_count, float2 *out, float *out_intensities, float *color_intensities) {
+                    int p;
+                    int i = blockDim.x * blockIdx.x + threadIdx.x;
+                    float2 res;
+                    res.x = 0.0;
+                    res.y = 0.0;
+                    for (p = 0; p < particle_count; p++) {
+                        int2 coords_i = particle_coords[p];
+                        //15 is vector spacing
+                        float dx = blockIdx.x * 15 - coords_i.x;
+                        float dy = threadIdx.x * 15 - coords_i.y;
+                        float dist_squared = dx * dx + dy * dy;
+                        float normalizer = rsqrt(dist_squared);
+                        float2 vec_normal;
+                        vec_normal.x = dx * normalizer;
+                        vec_normal.y = dy * normalizer;
+                        dist_squared += 1.5;
+                        float intensities_normal = (4 * particle_charges[p]) / dist_squared;
+                        vec_normal.x *= intensities_normal;
+                        vec_normal.y *= intensities_normal;
+                        res.x += vec_normal.x;
+                        res.y += vec_normal.y;
+                    }
+                    out[i] = res;
+                    out_intensities[i] = sqrt(res.x * res.x + res.y * res.y);
+                    color_intensities[i] = sqrt(res.x * res.x + res.y * res.y) * (0.05 / 255.0);
+                }
+                ''',
+                "show_vectors"
+            )
     def check_buffers(self):
         if self.h != self.screen.get_height() or self.w != self.screen.get_width():
             self.h = self.screen.get_height()
@@ -81,53 +116,76 @@ class Field:
 
             normal_shape = self.x_f.shape
             stacked_shape = (normal_shape[0], normal_shape[1], 2)
-            self.dx = np.zeros(normal_shape)
-            self.dy = np.zeros(normal_shape)
-            self.dx_square = np.zeros(normal_shape)
-            self.dy_square = np.zeros(normal_shape)
-            self.dir_field = np.zeros(stacked_shape)
-            self.raw_field = np.zeros(stacked_shape)
-            self.dist_squared = np.zeros(normal_shape)
-            self.dist_squared_divisors = np.zeros(normal_shape)
+            if using_cupy:
+                self.color_intensities = np.zeros(normal_shape, dtype=np.float32)
+                self.intensities = np.zeros(normal_shape, dtype=np.float32)
+                self.raw_field = np.zeros(stacked_shape, dtype=np.float32)
+            else:
+                self.color_intensities = np.zeros(normal_shape)
+                self.intensities = np.zeros(normal_shape)
+                self.raw_field = np.zeros(stacked_shape)
+            if not using_cupy:
+                self.dx = np.zeros(normal_shape)
+                self.dy = np.zeros(normal_shape)
+                self.dx_square = np.zeros(normal_shape)
+                self.dy_square = np.zeros(normal_shape)
+                self.dir_field = np.zeros(stacked_shape)
 
-            # note: not used by linarg
-            self.dist_root = np.zeros(normal_shape)
+                self.dist_squared = np.zeros(normal_shape)
+                self.dist_squared_divisors = np.zeros(normal_shape)
 
-            self.norm_divider = np.zeros(stacked_shape)
-            self.norm_field = np.zeros(stacked_shape)
-            self.intensities_normal = np.zeros(normal_shape)
-            self.force = np.zeros(stacked_shape)
-            self.force_field = np.zeros(stacked_shape)
+                # note: not used by linarg
+                self.dist_root = np.zeros(normal_shape)
 
-            # note: not used by linarg
-            self.intensities = np.zeros(normal_shape)
+                self.norm_divider = np.zeros(stacked_shape)
+                self.norm_field = np.zeros(stacked_shape)
+                self.intensities_normal = np.zeros(normal_shape)
+                self.force = np.zeros(stacked_shape)
+                self.force_field = np.zeros(stacked_shape)
 
-            self.color_intensities = np.zeros(normal_shape)
+                # note: not used by linarg
+
+
+
 
     def compute(self, particles):
         self.check_buffers()
-        oldtime = time.time()
-        self.raw_field.fill(0)
-        for particle in particles:
-            np.subtract(self.x_f, particle.x, out=self.dx)
-            np.subtract(self.y_f, particle.y, out=self.dy)
-            np.stack([self.dx, self.dy], axis=-1, out=self.dir_field)
-            np.square(self.dx, out=self.dx_square)
-            np.square(self.dy, out=self.dy_square)
-            np.add(self.dx_square, self.dy_square, out=self.dist_squared)
-            self.dist_root = np.linalg.norm(self.dir_field, ord=None, axis=-1)
-            np.stack([self.dist_root, self.dist_root], axis=-1, out=self.norm_divider)
-            np.divide(self.dir_field, self.norm_divider, out=self.norm_field)
-            np.add(self.dist_squared, 1.5, out=self.dist_squared_divisors)
-            np.divide(4 * particle.charge, self.dist_squared_divisors, out=self.intensities_normal)
-            np.stack([self.intensities_normal, self.intensities_normal], axis=-1, out=self.force)
-            np.multiply(self.norm_field, self.force, out=self.force_field)
-            np.add(self.raw_field, self.force_field, out=self.raw_field)
-        self.intensities = np.linalg.norm(self.raw_field, ord=None, axis=-1)
-        max_intensity = 0.05 / 255.0
-        np.divide(self.intensities, max_intensity, out=self.color_intensities)
-        timeamount = time.time() - oldtime
-        print("Computed in", timeamount, "seconds")
+        if using_cupy:
+            particle_coords = []
+            particle_charges = []
+
+            for particle in particles:
+                particle_coords.append([particle.x, particle.y])
+                particle_charges.append(particle.charge)
+
+            pcoords = np.array(particle_coords, dtype=np.int32)
+            pcharges = np.array(particle_charges, dtype=np.float32)
+            print(pcoords.shape, pcharges.shape)
+            self.kernel((math.ceil(self.w / self.vector_spacing),), (math.ceil(self.h / self.vector_spacing),), (pcoords, pcharges, len(particles), self.raw_field, self.intensities, self.color_intensities))
+            print("ran kernel")
+        else:
+            oldtime = time.time()
+            self.raw_field.fill(0)
+            for particle in particles:
+                np.subtract(self.x_f, particle.x, out=self.dx)
+                np.subtract(self.y_f, particle.y, out=self.dy)
+                np.stack([self.dx, self.dy], axis=-1, out=self.dir_field)
+                np.square(self.dx, out=self.dx_square)
+                np.square(self.dy, out=self.dy_square)
+                np.add(self.dx_square, self.dy_square, out=self.dist_squared)
+                self.dist_root = np.linalg.norm(self.dir_field, ord=None, axis=-1)
+                np.stack([self.dist_root, self.dist_root], axis=-1, out=self.norm_divider)
+                np.divide(self.dir_field, self.norm_divider, out=self.norm_field)
+                np.add(self.dist_squared, 1.5, out=self.dist_squared_divisors)
+                np.divide(4 * particle.charge, self.dist_squared_divisors, out=self.intensities_normal)
+                np.stack([self.intensities_normal, self.intensities_normal], axis=-1, out=self.force)
+                np.multiply(self.norm_field, self.force, out=self.force_field)
+                np.add(self.raw_field, self.force_field, out=self.raw_field)
+            self.intensities = np.linalg.norm(self.raw_field, ord=None, axis=-1)
+            max_intensity = 0.05 / 255.0
+            np.divide(self.intensities, max_intensity, out=self.color_intensities)
+            timeamount = time.time() - oldtime
+            print("Computed in", timeamount, "seconds")
 
     def show_vectors(self, screen: pygame.Surface, particles):
         h = screen.get_height()
