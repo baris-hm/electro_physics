@@ -3,13 +3,26 @@ import time
 
 import sys
 import os
+
 oldstdout = sys.stdout
 with open(os.devnull, "w") as sys.stdout:
-    #suppress pygame banner
+    # suppress pygame banner
     import pygame
 sys.stdout = oldstdout
-import numpy as np
-
+# TODO: Use custom prebuilt GPU kernel with cupy instead of generic numpy wrapper
+if os.getenv("USE_CUPY"):
+    print("Importing CuPy...")
+    try:
+        import cupy as np
+    except ImportError:
+        print("Could not import CuPy, falling back to NumPy...")
+        import numpy as np
+    else:
+        print("Successfully imported CuPy")
+else:
+    print("Importing NumPy...")
+    import numpy as np
+np.show_config()
 pygame.init()
 
 RED = (255, 0, 0)
@@ -51,31 +64,70 @@ class Field:
         self.screen = screen
         self.vector_spacing = vector_spacing
         self.particles = particles
+        # intentionally setting h and w to bogus values
+        self.h = None
+        self.w = None
+        # so the check below gets triggered and we recycle code for init
+        self.check_buffers()
+
+    def check_buffers(self):
+        if self.h != self.screen.get_height() or self.w != self.screen.get_width():
+            self.h = self.screen.get_height()
+            self.w = self.screen.get_width()
+            self.y_f = np.array(
+                [list(range(0, self.h, self.vector_spacing)) for _ in range(0, self.w, self.vector_spacing)])
+            self.x_f = np.array(
+                [[x for _ in range(0, self.h, self.vector_spacing)] for x in range(0, self.w, self.vector_spacing)])
+
+            normal_shape = self.x_f.shape
+            stacked_shape = (normal_shape[0], normal_shape[1], 2)
+            self.dx = np.zeros(normal_shape)
+            self.dy = np.zeros(normal_shape)
+            self.dx_square = np.zeros(normal_shape)
+            self.dy_square = np.zeros(normal_shape)
+            self.dir_field = np.zeros(stacked_shape)
+            self.raw_field = np.zeros(stacked_shape)
+            self.dist_squared = np.zeros(normal_shape)
+            self.dist_squared_divisors = np.zeros(normal_shape)
+
+            # note: not used by linarg
+            self.dist_root = np.zeros(normal_shape)
+
+            self.norm_divider = np.zeros(stacked_shape)
+            self.norm_field = np.zeros(stacked_shape)
+            self.intensities_normal = np.zeros(normal_shape)
+            self.force = np.zeros(stacked_shape)
+            self.force_field = np.zeros(stacked_shape)
+
+            # note: not used by linarg
+            self.intensities = np.zeros(normal_shape)
+
+            self.color_intensities = np.zeros(normal_shape)
 
     def compute(self, particles):
-        h = self.screen.get_height()
-        w = self.screen.get_width()
-
-        y_f = np.array([list(range(0, h, self.vector_spacing)) for _ in range(0, w, self.vector_spacing)])
-        x_f = np.array([[x for _ in range(0, h, self.vector_spacing)] for x in range(0, w, self.vector_spacing)])
-
-        self.raw_field = np.zeros((x_f.shape[0], x_f.shape[1], 2))
-
+        self.check_buffers()
+        oldtime = time.time()
+        self.raw_field.fill(0)
         for particle in particles:
-            dx = x_f - particle.x
-            dy = y_f - particle.y
-            dir_field = np.stack([dx, dy], axis=-1)
-            dist_squared = (dx * dx) + (dy * dy)
-            dist_root = np.linalg.norm(dir_field, ord=None, axis=-1)
-            norm_divider = np.stack([dist_root, dist_root], axis=-1)
-            norm_field = dir_field / norm_divider
-            intensities_normal = (4 * particle.charge) / (dist_squared + 1.5)
-            force = np.stack([intensities_normal, intensities_normal], axis=-1)
-            force_field = norm_field * force
-            self.raw_field += force_field
+            np.subtract(self.x_f, particle.x, out=self.dx)
+            np.subtract(self.y_f, particle.y, out=self.dy)
+            np.stack([self.dx, self.dy], axis=-1, out=self.dir_field)
+            np.square(self.dx, out=self.dx_square)
+            np.square(self.dy, out=self.dy_square)
+            np.add(self.dx_square, self.dy_square, out=self.dist_squared)
+            self.dist_root = np.linalg.norm(self.dir_field, ord=None, axis=-1)
+            np.stack([self.dist_root, self.dist_root], axis=-1, out=self.norm_divider)
+            np.divide(self.dir_field, self.norm_divider, out=self.norm_field)
+            np.add(self.dist_squared, 1.5, out=self.dist_squared_divisors)
+            np.divide(4 * particle.charge, self.dist_squared_divisors, out=self.intensities_normal)
+            np.stack([self.intensities_normal, self.intensities_normal], axis=-1, out=self.force)
+            np.multiply(self.norm_field, self.force, out=self.force_field)
+            np.add(self.raw_field, self.force_field, out=self.raw_field)
         self.intensities = np.linalg.norm(self.raw_field, ord=None, axis=-1)
         max_intensity = 0.05 / 255.0
-        self.color_intensities = self.intensities / max_intensity
+        np.divide(self.intensities, max_intensity, out=self.color_intensities)
+        timeamount = time.time() - oldtime
+        print("Computed in", timeamount, "seconds")
 
     def show_vectors(self, screen: pygame.Surface, particles):
         h = screen.get_height()
@@ -94,11 +146,11 @@ class Field:
                 if length != 0:
                     x_unit = vector_x / length
                     y_unit = vector_y / length
-                    #pygame.draw.line(screen, GREY,
+                    # pygame.draw.line(screen, GREY,
                     #                 (x + vector_x, y + vector_y),
                     #                 (x + vector_x - x_unit - y_unit, y + vector_y - y_unit + x_unit)
                     #                 )
-                    #pygame.draw.line(screen, GREY,
+                    # pygame.draw.line(screen, GREY,
                     #                 (x + vector_x, y + vector_y),
                     #                 (x + vector_x - x_unit + y_unit, y + vector_y - y_unit - x_unit)
                     #                 )
@@ -122,19 +174,19 @@ class Field:
                 length = self.intensities[int(x)][int(y)]
                 ci = self.color_intensities[int(x)][int(y)]
                 if length != 0 and not np.isnan(length):
-                    x_unit = vector_x * 5 / length
-                    y_unit = vector_y * 5 / length
-                    #print(length)
+                    x_unit = int(vector_x * 5 / length)
+                    y_unit = int(vector_y * 5 / length)
+                    # print(length)
                     color = (min(255, int(ci)), min(255, max(0, int(127 - ci))), 0)
-                    #despaghettify
-                    #print("LINE", (xdraw, ydraw), (xdraw + 3 * x_unit, ydraw + 3 * y_unit))
+                    # despaghettify
+                    # print("LINE", (xdraw, ydraw), (xdraw + 3 * x_unit, ydraw + 3 * y_unit))
                     pygame.draw.line(screen, color, (xdraw, ydraw), (xdraw + 3 * x_unit, ydraw + 3 * y_unit))
-                    #print("LINE1", (xdraw + 3 * x_unit, ydraw + 3 * y_unit), (xdraw + 2 * x_unit - y_unit, y + 2 * y_unit + x_unit))
+                    # print("LINE1", (xdraw + 3 * x_unit, ydraw + 3 * y_unit), (xdraw + 2 * x_unit - y_unit, y + 2 * y_unit + x_unit))
                     pygame.draw.line(screen, color,
                                      (xdraw + 3 * x_unit, ydraw + 3 * y_unit),
                                      (xdraw + 2 * x_unit - y_unit, ydraw + 2 * y_unit + x_unit)
                                      )
-                    #print("LINE2", (xdraw + 3 * x_unit, ydraw + 3 * y_unit), (xdraw + 2 * x_unit + y_unit, y + 2 * y_unit - x_unit))
+                    # print("LINE2", (xdraw + 3 * x_unit, ydraw + 3 * y_unit), (xdraw + 2 * x_unit + y_unit, y + 2 * y_unit - x_unit))
                     pygame.draw.line(screen, color,
                                      (xdraw + 3 * x_unit, ydraw + 3 * y_unit),
                                      (xdraw + 2 * x_unit + y_unit, ydraw + 2 * y_unit - x_unit)
@@ -184,7 +236,8 @@ def main():
 
     add_stick(100, 30, 5)
     add_stick(400, 30, -5)
-    particles = [Particle(700, 300, 20), Particle(600, 150, 20), Particle(700, 150, -20)]
+    particles = [Particle(random.randrange(0, 800), random.randrange(0, 600), random.randrange(-20, 21)) for _ in
+                 range(20)]
     particles += stick_list
     field = Field(screen, particles, vector_spacing=15)
     upper_bar = UpperBar(screen)
@@ -199,12 +252,16 @@ def main():
                 click = upper_bar.get_clicked(pygame.mouse.get_pos())
         screen.fill(BLACK)
         # field.show_vectors(screen, particles)
+        oldt = time.time()
         field.show_vectors_with_color(screen, particles)
         particles[0].move(pygame.mouse.get_pos())
         for particle in particles:
             particle.show(screen)
         upper_bar.show()
         pygame.display.update()
+        newt = time.time()
+        difference = newt - oldt
+        print("Rendered in", difference, "seconds")
 
 
 if __name__ == '__main__':
