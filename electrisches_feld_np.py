@@ -4,7 +4,7 @@ import time
 import sys
 import os
 oldstdout = sys.stdout
-with open(os.devnull) as sys.stdout:
+with open(os.devnull, "w") as sys.stdout:
     #suppress pygame banner
     import pygame
 sys.stdout = oldstdout
